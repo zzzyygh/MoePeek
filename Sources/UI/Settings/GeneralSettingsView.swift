@@ -9,6 +9,7 @@ struct GeneralSettingsView: View {
     @Default(.isAutoDetectEnabled) private var isAutoDetectEnabled
     @Default(.textDetectionMode) private var textDetectionMode
     @Default(.triggerActivationMode) private var triggerActivationMode
+    @Default(.ocrInPlaceOverlay) private var ocrInPlaceOverlay
     @Default(.showInDock) private var showInDock
     @Default(.popupDefaultWidth) private var popupDefaultWidth
     @Default(.popupDefaultHeight) private var popupDefaultHeight
@@ -61,6 +62,11 @@ struct GeneralSettingsView: View {
             }
 
             Section("General") {
+                Toggle("In-place screenshot translation", isOn: $ocrInPlaceOverlay)
+                Text("When Screenshot OCR is triggered, paint each translation over the original text in the captured image instead of opening the translation popup.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Picker("App Language:", selection: $appLanguage) {
                     ForEach(AppLanguage.allCases, id: \.self) { language in
                         Text(language.displayName).tag(language)

@@ -11,8 +11,25 @@ enum ScreenCaptureOCR {
             return true
         }
     }
+
     /// Launch interactive screen capture, OCR the captured image, and return recognized text.
     static func captureAndRecognize() async throws -> String {
+        let result = try await captureWithTextRegions()
+        let text = result.regions
+            .map(\.trimmedText)
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        if text.isEmpty {
+            throw OCRError.noTextRecognized
+        }
+        return text
+    }
+
+    /// Launch interactive screen capture and OCR with bounding boxes retained.
+    ///
+    /// Used by the in-place overlay flow, which paints each translation back onto the
+    /// original region instead of showing a separate result popup.
+    static func captureWithTextRegions() async throws -> OCRCaptureResult {
         // Generate a unique temp file path to avoid concurrency conflicts
         let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("moepeek_ocr_\(UUID().uuidString).png")
@@ -58,10 +75,16 @@ enum ScreenCaptureOCR {
             return cg
         }
 
-        return try await recognizeText(in: cgImage)
+        let regions = try await recognizeTextRegions(in: cgImage)
+        guard regions.contains(where: \.isUsable) else {
+            throw OCRError.noTextRecognized
+        }
+        return OCRCaptureResult(image: cgImage, regions: regions.filter(\.isUsable))
     }
 
-    private static func recognizeText(in image: CGImage) async throws -> String {
+    /// OCR with line-level geometry. Returns observations sorted in reading order
+    /// (top → bottom, then left → right) so batch translation maps predictably.
+    static func recognizeTextRegions(in image: CGImage) async throws -> [OCRTextRegion] {
         try await withCheckedThrowingContinuation { continuation in
             let resumed = OSAllocatedUnfairLock(initialState: false)
 
@@ -74,15 +97,17 @@ enum ScreenCaptureOCR {
                 }
 
                 let observations = request.results as? [VNRecognizedTextObservation] ?? []
-                let text = observations
-                    .compactMap { $0.topCandidates(1).first?.string }
-                    .joined(separator: "\n")
-
-                if text.isEmpty {
-                    continuation.resume(throwing: OCRError.noTextRecognized)
-                } else {
-                    continuation.resume(returning: text)
+                let regions = observations.compactMap { observation -> OCRTextRegion? in
+                    guard let candidate = observation.topCandidates(1).first else { return nil }
+                    let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { return nil }
+                    return OCRTextRegion(
+                        text: text,
+                        boundingBox: observation.boundingBox,
+                        confidence: candidate.confidence
+                    )
                 }
+                continuation.resume(returning: Self.sortedInReadingOrder(regions))
             }
 
             request.recognitionLevel = .accurate
@@ -97,6 +122,19 @@ enum ScreenCaptureOCR {
                 guard claimOnce(resumed) else { return }
                 continuation.resume(throwing: error)
             }
+        }
+    }
+
+    /// Sort by Vision's top edge (maxY desc), then left edge. Ties keep x order stable.
+    static func sortedInReadingOrder(_ regions: [OCRTextRegion]) -> [OCRTextRegion] {
+        regions.sorted { lhs, rhs in
+            let lhsTop = lhs.boundingBox.maxY
+            let rhsTop = rhs.boundingBox.maxY
+            // Snap near-equal rows so multi-column lines still read left → right as a group.
+            if abs(lhsTop - rhsTop) > 0.012 {
+                return lhsTop > rhsTop
+            }
+            return lhs.boundingBox.minX < rhs.boundingBox.minX
         }
     }
 }
