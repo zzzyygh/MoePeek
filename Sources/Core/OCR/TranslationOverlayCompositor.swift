@@ -1,6 +1,5 @@
 import AppKit
 import CoreGraphics
-import CoreText
 import Foundation
 
 /// Paints OCR translations over the original text so the screenshot itself reads as translated.
@@ -175,26 +174,50 @@ enum TranslationOverlayCompositor {
             .paragraphStyle: paragraph,
         ])
 
-        let framesetter = CTFramesetterCreateWithAttributedString(attributed as CFAttributedString)
-        let textHeight = min(maxTextHeight, Self.textBounds(text, font: font, maxWidth: maxTextWidth).height)
-        let drawWidth = min(maxTextWidth, max(4, Self.textBounds(text, font: font, maxWidth: maxTextWidth).width))
-        // Core Text frames are bottom-left origin; center the text block on the plate.
-        let drawRect = CGRect(
+        let measured = Self.textBounds(text, font: font, maxWidth: maxTextWidth)
+        let textHeight = min(maxTextHeight, measured.height)
+        let drawWidth = min(maxTextWidth, max(4, measured.width))
+        guard let textImage = renderTextImage(attributed, width: drawWidth, height: textHeight) else {
+            return
+        }
+
+        // coverRect is in CGContext space (origin bottom-left). CGContext.draw preserves
+        // CGImage orientation, so an upright text bitmap stays upright here.
+        let cgDrawRect = CGRect(
             x: rect.midX - drawWidth / 2,
             y: rect.midY - textHeight / 2,
             width: drawWidth,
             height: textHeight
         )
-
-        let path = CGPath(rect: drawRect, transform: nil)
-        let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: attributed.length), path, nil)
-
         context.saveGState()
-        // Flip this frame only so Core Text's top-down line layout lands upright on the bitmap.
-        context.translateBy(x: 0, y: drawRect.minY + drawRect.maxY)
-        context.scaleBy(x: 1, y: -1)
-        CTFrameDraw(frame, context)
+        context.draw(textImage, in: cgDrawRect)
         context.restoreGState()
+    }
+
+    /// Renders attributed text into an opaque-free bitmap using AppKit's top-left
+    /// graphics context (correct glyph orientation), then returns it as a CGImage.
+    private static func renderTextImage(_ attributed: NSAttributedString, width: CGFloat, height: CGFloat) -> CGImage? {
+        let pixelWidth = max(1, Int(ceil(width)))
+        let pixelHeight = max(1, Int(ceil(height)))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+
+        rep.size = NSSize(width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        attributed.draw(in: CGRect(x: 0, y: 0, width: CGFloat(pixelWidth), height: CGFloat(pixelHeight)))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
     }
 
     // MARK: - Pixel sampling
