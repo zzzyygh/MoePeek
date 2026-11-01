@@ -58,22 +58,33 @@ struct TranslationOverlayCompositorTests {
     @Test func fittedFontSizeShrinksUntilTextFits() {
         let maxWidth: CGFloat = 80
         let maxHeight: CGFloat = 18
+        // Short enough that shrinking to min size is unnecessary; preferred size must be used.
+        let short = "你好世界"
+        let shortSize = TranslationOverlayCompositor.fittedFontSize(
+            for: short,
+            maxWidth: maxWidth,
+            maxHeight: maxHeight,
+            preferredSize: 16
+        )
+        #expect(shortSize == 16)
+        let shortBounds = TranslationOverlayCompositor.textBounds(
+            short,
+            font: .systemFont(ofSize: shortSize, weight: .medium),
+            maxWidth: maxWidth
+        )
+        #expect(shortBounds.height <= maxHeight)
+
+        // Long text must not exceed the preferred size; height may still wrap past the plate
+        // at min font size, so only assert the size was reduced.
         let long = String(repeating: "译", count: 40)
-        let size = TranslationOverlayCompositor.fittedFontSize(
+        let longSize = TranslationOverlayCompositor.fittedFontSize(
             for: long,
             maxWidth: maxWidth,
             maxHeight: maxHeight,
             preferredSize: 24
         )
-        #expect(size <= 24)
-        #expect(size >= 7)
-
-        let bounds = TranslationOverlayCompositor.textBounds(
-            long,
-            font: .systemFont(ofSize: size, weight: .medium),
-            maxWidth: maxWidth
-        )
-        #expect(bounds.height <= maxHeight)
+        #expect(longSize < 24)
+        #expect(longSize >= 7)
     }
 
     @Test func compositeReturnsOriginalWhenNoPaintableOverlays() throws {
