@@ -18,7 +18,7 @@ final class ScreenshotTranslationOverlayCoordinator {
 
     private let permissionManager: any PermissionChecking
     private let registry: TranslationProviderRegistry
-    private let capture: @escaping @MainActor () async throws -> OCRCaptureResult
+    private let capture: @MainActor () async throws -> OCRCaptureResult
 
     init(
         permissionManager: any PermissionChecking,
@@ -77,15 +77,13 @@ final class ScreenshotTranslationOverlayCoordinator {
         let targetLanguage = OCRRegionTranslator.resolveTargetLanguage(detectedSource: sourceLanguage)
 
         let providerResults: [OCRRegionTranslator.ProviderTranslateResult]
-        do {
-            try Task.checkCancellation()
-            providerResults = await OCRRegionTranslator.translateOrdered(
-                regions: regions,
-                providers: providers,
-                from: sourceLanguage,
-                to: targetLanguage
-            )
-        }
+        if Task.isCancelled { return .cancelled }
+        providerResults = await OCRRegionTranslator.translateOrdered(
+            regions: regions,
+            providers: providers,
+            from: sourceLanguage,
+            to: targetLanguage
+        )
         if Task.isCancelled { return .cancelled }
 
         guard !providerResults.isEmpty else {
