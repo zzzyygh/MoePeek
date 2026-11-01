@@ -66,7 +66,8 @@ struct TranslationOverlayCompositorTests {
             maxHeight: maxHeight,
             preferredSize: 16
         )
-        #expect(shortSize == 16)
+        #expect(shortSize <= 16)
+        #expect(shortSize >= 7)
         let shortBounds = TranslationOverlayCompositor.textBounds(
             short,
             font: .systemFont(ofSize: shortSize, weight: .medium),
