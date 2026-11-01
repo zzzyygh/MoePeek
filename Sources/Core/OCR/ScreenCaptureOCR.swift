@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Vision
 import os
 
@@ -38,7 +39,8 @@ enum ScreenCaptureOCR {
         // Run screencapture -i <tmpPath> (interactive selection → temp file, clipboard untouched)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-i", tmpURL.path]
+        // -x: no shutter sound; -t png: force a predictable raster format for Vision.
+        process.arguments = ["-i", "-x", "-t", "png", tmpURL.path]
 
         let status = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int32, Error>) in
@@ -64,15 +66,13 @@ enum ScreenCaptureOCR {
             throw OCRError.captureCancelled
         }
 
-        // Read image from temp file and perform OCR inside autoreleasepool
-        // to ensure large screenshot images are freed promptly.
+        // Decode via ImageIO and normalize to an 8-bit RGB bitmap. Wide-gamut or odd
+        // pixel layouts from screencapture can surface as CRImageReaderError in Vision.
         let cgImage: CGImage = try autoreleasepool {
-            guard let image = NSImage(contentsOf: tmpURL),
-                  let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            else {
+            guard let normalized = loadNormalizedImage(at: tmpURL) else {
                 throw OCRError.captureReadFailed
             }
-            return cg
+            return normalized
         }
 
         let regions = try await recognizeTextRegions(in: cgImage)
@@ -82,9 +82,72 @@ enum ScreenCaptureOCR {
         return OCRCaptureResult(image: cgImage, regions: regions.filter(\.isUsable))
     }
 
+    /// Reads a screenshot file and returns a plain 8-bit premultiplied RGBA bitmap.
+    static func loadNormalizedImage(at url: URL) -> CGImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldAllowFloat: false,
+        ]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary),
+              let raw = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return normalizeForVision(raw) ?? raw
+    }
+
+    /// Redraws into a device-RGB 8-bit context so Vision never sees P3/16-bit/odd alpha layouts.
+    static func normalizeForVision(_ image: CGImage) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+
+        // Skip redraw when already a plain 8-bit RGB(A) bitmap.
+        if let space = image.colorSpace,
+           space.model == .rgb,
+           image.bitsPerComponent == 8,
+           image.alphaInfo == .premultipliedLast || image.alphaInfo == .noneSkipLast {
+            return image
+        }
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+
+        context.interpolationQuality = .none
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        return context.makeImage()
+    }
+
     /// OCR with line-level geometry. Returns observations sorted in reading order
     /// (top → bottom, then left → right) so batch translation maps predictably.
     static func recognizeTextRegions(in image: CGImage) async throws -> [OCRTextRegion] {
+        let candidates: [CGImage] = {
+            let normalized = normalizeForVision(image)
+            if let normalized, normalized !== image {
+                return [normalized, image]
+            }
+            return [image]
+        }()
+
+        var lastError: Error = OCRError.imageUnreadable
+        for candidate in candidates {
+            do {
+                return try await performTextRecognition(on: candidate)
+            } catch {
+                lastError = mapVisionError(error)
+            }
+        }
+        throw lastError
+    }
+
+    private static func performTextRecognition(on image: CGImage) async throws -> [OCRTextRegion] {
         try await withCheckedThrowingContinuation { continuation in
             let resumed = OSAllocatedUnfairLock(initialState: false)
 
@@ -92,7 +155,7 @@ enum ScreenCaptureOCR {
                 guard claimOnce(resumed) else { return }
 
                 if let error {
-                    continuation.resume(throwing: error)
+                    continuation.resume(throwing: mapVisionError(error))
                     return
                 }
 
@@ -107,7 +170,7 @@ enum ScreenCaptureOCR {
                         confidence: candidate.confidence
                     )
                 }
-                continuation.resume(returning: Self.sortedInReadingOrder(regions))
+                continuation.resume(returning: sortedInReadingOrder(regions))
             }
 
             request.recognitionLevel = .accurate
@@ -120,9 +183,22 @@ enum ScreenCaptureOCR {
                 try handler.perform([request])
             } catch {
                 guard claimOnce(resumed) else { return }
-                continuation.resume(throwing: error)
+                continuation.resume(throwing: mapVisionError(error))
             }
         }
+    }
+
+    /// Surfaces Vision/ImageIO failures as actionable OCR errors instead of raw NSError dumps.
+    private static func mapVisionError(_ error: Error) -> Error {
+        let ns = error as NSError
+        // CRImageReaderError domain appears as TextRecognition.CRImageReaderError.
+        if ns.domain.contains("CRImageReader") || ns.domain.contains("TextRecognition") {
+            return OCRError.imageUnreadable
+        }
+        if ns.domain.contains("CGImageSource") || ns.domain.contains("CGError") {
+            return OCRError.captureReadFailed
+        }
+        return error
     }
 
     /// Sort by Vision's top edge (maxY desc), then left edge. Ties keep x order stable.
@@ -143,12 +219,14 @@ enum OCRError: LocalizedError {
     case captureCancelled
     case captureReadFailed
     case noTextRecognized
+    case imageUnreadable
 
     var errorDescription: String? {
         switch self {
         case .captureCancelled:  String(localized: "Screen capture was cancelled")
         case .captureReadFailed: String(localized: "Failed to read the captured image")
         case .noTextRecognized:  String(localized: "No text was recognized in the captured image")
+        case .imageUnreadable:   String(localized: "Could not decode the screenshot for OCR. Try selecting a smaller region.")
         }
     }
 }
