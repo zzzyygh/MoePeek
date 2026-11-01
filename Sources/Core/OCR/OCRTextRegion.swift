@@ -51,7 +51,10 @@ struct OCRTextOverlay: Sendable, Equatable {
     init(region: OCRTextRegion, translation: String) {
         self.init(
             region: region,
-            variants: [OCRTranslationVariant(providerName: "", text: translation)]
+            variants: [OCRTranslationVariant(
+                providerName: "",
+                text: translation.trimmingCharacters(in: .whitespacesAndNewlines)
+            )]
         )
     }
 
