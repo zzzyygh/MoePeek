@@ -1,3 +1,5 @@
+import AppKit
+import CoreGraphics
 import Defaults
 import Foundation
 
@@ -18,7 +20,7 @@ final class ScreenshotTranslationOverlayCoordinator {
     init(
         permissionManager: any PermissionChecking,
         registry: TranslationProviderRegistry,
-        capture: @MainActor () async throws -> OCRCaptureResult = ScreenCaptureOCR.captureWithTextRegions
+        capture: @escaping @MainActor () async throws -> OCRCaptureResult = ScreenCaptureOCR.captureWithTextRegions
     ) {
         self.permissionManager = permissionManager
         self.registry = registry
