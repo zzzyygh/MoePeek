@@ -153,9 +153,61 @@ enum OCRRegionTranslator {
         )
     }
 
-    /// First automatically-enabled slot in user order — what the overlay paints with.
+    /// Automatically-enabled slots in user order — used for multi-source overlay compare.
+    /// Capped so a long provider list does not turn each OCR box into a wall of text.
+    static func overlayProviders(
+        from registry: TranslationProviderRegistry,
+        maxCount: Int = 3
+    ) -> [any TranslationProvider] {
+        Array(
+            registry.enabledSlots
+                .filter { registry.translatesAutomatically($0) }
+                .prefix(max(1, maxCount))
+        )
+    }
+
+    /// First automatically-enabled slot in user order — single-source fallback.
     static func primaryProvider(from registry: TranslationProviderRegistry) -> (any TranslationProvider)? {
-        registry.enabledSlots.first { registry.translatesAutomatically($0) }
+        overlayProviders(from: registry, maxCount: 1).first
+    }
+
+    /// Ordered multi-provider translation: one entry per provider (input order),
+    /// each with a translation per usable region. Providers that fail are skipped.
+    static func translateOrdered(
+        regions: [OCRTextRegion],
+        providers: [any TranslationProvider],
+        from sourceLanguage: String?,
+        to targetLanguage: String
+    ) async -> [ProviderTranslateResult] {
+        await withTaskGroup(of: (Int, ProviderTranslateResult).self) { group in
+            for (index, provider) in providers.enumerated() {
+                group.addTask { [provider] in
+                    let texts: [String]
+                    do {
+                        texts = try await self.translate(
+                            regions: regions,
+                            using: provider,
+                            from: sourceLanguage,
+                            to: targetLanguage
+                        )
+                    } catch {
+                        texts = []
+                    }
+                    return (index, ProviderTranslateResult(providerName: provider.displayName, translations: texts))
+                }
+            }
+
+            var slots = [ProviderTranslateResult?](repeating: nil, count: providers.count)
+            for await (index, result) in group {
+                slots[index] = result
+            }
+            return slots.compactMap { $0 }
+        }
+    }
+
+    struct ProviderTranslateResult: Sendable, Equatable {
+        let providerName: String
+        let translations: [String]
     }
 
     private static func collect(_ stream: AsyncThrowingStream<String, Error>) async throws -> String {

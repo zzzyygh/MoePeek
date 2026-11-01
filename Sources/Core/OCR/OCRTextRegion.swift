@@ -25,20 +25,53 @@ struct OCRCaptureResult: @unchecked Sendable {
     let regions: [OCRTextRegion]
 }
 
-/// One translation painted over an original OCR region.
+/// One provider's translation for a region (used for multi-source comparison).
+struct OCRTranslationVariant: Sendable, Equatable {
+    let providerName: String
+    let text: String
+
+    var isEmpty: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// One overlay painted over an original OCR region.
+/// Multiple `variants` stack top-to-bottom for side-by-side comparison.
 struct OCRTextOverlay: Sendable, Equatable {
     let originalText: String
-    let translation: String
     let boundingBox: CGRect
+    let variants: [OCRTranslationVariant]
+
+    init(region: OCRTextRegion, variants: [OCRTranslationVariant]) {
+        self.originalText = region.trimmedText
+        self.boundingBox = region.boundingBox
+        self.variants = variants.filter { !$0.isEmpty }
+    }
 
     init(region: OCRTextRegion, translation: String) {
-        self.originalText = region.trimmedText
-        self.translation = translation.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.boundingBox = region.boundingBox
+        self.init(
+            region: region,
+            variants: [OCRTranslationVariant(providerName: "", text: translation)]
+        )
     }
 
     var hasTranslation: Bool {
-        !translation.isEmpty
+        !variants.isEmpty
+    }
+
+    /// Top-to-bottom display lines (labels only when comparing multiple sources).
+    var displayLines: [String] {
+        guard variants.count > 1 else {
+            return variants.map(\.text)
+        }
+        return variants.map { variant in
+            let name = variant.providerName.isEmpty ? "" : "\(variant.providerName): "
+            return name + variant.text
+        }
+    }
+
+    var lineCount: Int {
+        max(1, displayLines.count)
     }
 }
 

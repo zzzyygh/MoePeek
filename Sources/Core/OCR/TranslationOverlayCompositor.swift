@@ -5,24 +5,29 @@ import Foundation
 /// Paints OCR translations over the original text so the screenshot itself reads as translated.
 enum TranslationOverlayCompositor {
     struct OverlayItem: Sendable, Equatable {
-        let translation: String
+        /// Top-to-bottom lines to paint (provider-labeled when comparing sources).
+        let lines: [String]
         let boundingBox: CGRect
 
         init(_ overlay: OCRTextOverlay) {
-            self.translation = overlay.translation
+            self.lines = overlay.displayLines.filter { !$0.isEmpty }
             self.boundingBox = overlay.boundingBox
         }
 
-        init(translation: String, boundingBox: CGRect) {
-            self.translation = translation
+        init(lines: [String], boundingBox: CGRect) {
+            self.lines = lines.filter { !$0.isEmpty }
             self.boundingBox = boundingBox
+        }
+
+        init(translation: String, boundingBox: CGRect) {
+            self.init(lines: [translation], boundingBox: boundingBox)
         }
     }
 
     /// Renders a new image with each overlay covering its source region.
     /// Returns the original image when there is nothing to paint.
     static func composite(image: CGImage, overlays: [OverlayItem]) -> CGImage {
-        let paintable = overlays.filter { !$0.translation.isEmpty }
+        let paintable = overlays.filter { !$0.lines.isEmpty }
         guard !paintable.isEmpty else { return image }
 
         let width = image.width
@@ -52,8 +57,20 @@ enum TranslationOverlayCompositor {
             guard !pixelRect.isNull, pixelRect.width >= 2, pixelRect.height >= 2 else { continue }
 
             let padding = max(2, pixelRect.height * 0.12)
-            let coverRect = OCRGeometry.expanded(pixelRect, inset: padding, bounds: imageBounds)
+            var coverRect = OCRGeometry.expanded(pixelRect, inset: padding, bounds: imageBounds)
             guard !coverRect.isNull, coverRect.width >= 2, coverRect.height >= 2 else { continue }
+
+            // Grow the plate vertically so stacked comparison lines all fit.
+            let lineCount = overlay.lines.count
+            if lineCount > 1 {
+                let perLine = max(pixelRect.height * 0.9, 16)
+                let needed = perLine * CGFloat(lineCount) + padding * 2
+                if needed > coverRect.height {
+                    let grow = (needed - coverRect.height) / 2
+                    coverRect = coverRect.insetBy(dx: 0, dy: -grow).intersection(imageBounds)
+                }
+            }
+            guard coverRect.width >= 2, coverRect.height >= 2 else { continue }
 
             let background = sampleBackgroundColor(in: image, around: coverRect)
             let textColor = contrastingTextColor(against: background)
@@ -64,8 +81,8 @@ enum TranslationOverlayCompositor {
             context.addPath(path)
             context.fillPath()
 
-            drawFittedText(
-                overlay.translation,
+            drawFittedLines(
+                overlay.lines,
                 in: coverRect,
                 context: context,
                 textColor: textColor
@@ -140,7 +157,36 @@ enum TranslationOverlayCompositor {
         return CGSize(width: ceil(bounds.width), height: ceil(bounds.height))
     }
 
-    /// Shrinks (then wraps) the translation until it fits the cover rect, then draws it with Core Text.
+    /// Paints one or more translation lines stacked top-to-bottom inside `rect`.
+    /// When `lines.count > 1`, each slot gets an equal horizontal band and a
+    /// slightly smaller font so sources can be compared in place.
+    static func drawFittedLines(
+        _ lines: [String],
+        in rect: CGRect,
+        context: CGContext,
+        textColor: NSColor
+    ) {
+        guard !lines.isEmpty, rect.width > 4, rect.height > 4 else { return }
+
+        let count = lines.count
+        let slotHeight = rect.height / CGFloat(count)
+        let topY = rect.maxY // CGContext: larger y is higher
+
+        for (index, line) in lines.enumerated() {
+            guard !line.isEmpty else { continue }
+            // Slot 0 at the top of the plate (highest y).
+            let slotTop = topY - CGFloat(index) * slotHeight
+            let slotRect = CGRect(
+                x: rect.minX,
+                y: slotTop - slotHeight,
+                width: rect.width,
+                height: slotHeight
+            )
+            drawFittedText(line, in: slotRect, context: context, textColor: textColor)
+        }
+    }
+
+    /// Shrinks (then wraps) a single line until it fits the slot, then draws it upright.
     static func drawFittedText(
         _ text: String,
         in rect: CGRect,
@@ -153,7 +199,7 @@ enum TranslationOverlayCompositor {
         let verticalPadding: CGFloat = 2
         let maxTextWidth = max(4, rect.width - horizontalPadding * 2)
         let maxTextHeight = max(4, rect.height - verticalPadding * 2)
-        let preferredSize = max(9, min(rect.height * 0.78, maxTextHeight))
+        let preferredSize = max(8, min(rect.height * 0.72, maxTextHeight))
 
         let fontSize = fittedFontSize(
             for: text,

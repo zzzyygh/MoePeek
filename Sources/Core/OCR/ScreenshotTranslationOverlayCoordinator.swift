@@ -4,7 +4,7 @@ import Defaults
 import Foundation
 
 /// Orchestrates Option+S for the in-place overlay path:
-/// capture with geometry → primary-provider translate → paint translations onto the shot.
+/// capture with geometry → multi-provider translate → paint stacked translations onto the shot.
 @MainActor
 final class ScreenshotTranslationOverlayCoordinator {
     enum Outcome: Equatable {
@@ -13,9 +13,12 @@ final class ScreenshotTranslationOverlayCoordinator {
         case failed(message: String)
     }
 
+    /// Maximum sources stacked per OCR box (keeps plates readable).
+    private static let maxOverlayProviders = 3
+
     private let permissionManager: any PermissionChecking
     private let registry: TranslationProviderRegistry
-    private let capture: @MainActor () async throws -> OCRCaptureResult
+    private let capture: @escaping @MainActor () async throws -> OCRCaptureResult
 
     init(
         permissionManager: any PermissionChecking,
@@ -37,7 +40,11 @@ final class ScreenshotTranslationOverlayCoordinator {
             return .failed(message: String(localized: "Screen recording permission not granted. Open Settings to enable it."))
         }
 
-        guard OCRRegionTranslator.primaryProvider(from: registry) != nil else {
+        let providers = OCRRegionTranslator.overlayProviders(
+            from: registry,
+            maxCount: Self.maxOverlayProviders
+        )
+        guard !providers.isEmpty else {
             return .failed(message: String(localized: "No providers enabled. Enable at least one in Settings."))
         }
 
@@ -53,37 +60,49 @@ final class ScreenshotTranslationOverlayCoordinator {
         }
 
         onOriginal(result.image)
-        onStatus(String(localized: "Translating…"))
+
+        let sourceNames = providers.map(\.displayName).joined(separator: " · ")
+        if providers.count > 1 {
+            onStatus(String(localized: "Translating with \(sourceNames)…"))
+        } else {
+            onStatus(String(localized: "Translating…"))
+        }
 
         let regions = result.regions.filter(\.isUsable)
         guard !regions.isEmpty else {
             return .failed(message: String(localized: "No text was recognized in the captured image"))
         }
 
-        guard let provider = OCRRegionTranslator.primaryProvider(from: registry) else {
-            return .failed(message: String(localized: "No providers enabled. Enable at least one in Settings."))
-        }
-
         let sourceLanguage = OCRRegionTranslator.resolveSourceLanguage(for: regions)
         let targetLanguage = OCRRegionTranslator.resolveTargetLanguage(detectedSource: sourceLanguage)
 
-        let translations: [String]
+        let providerResults: [OCRRegionTranslator.ProviderTranslateResult]
         do {
-            translations = try await OCRRegionTranslator.translate(
+            try Task.checkCancellation()
+            providerResults = await OCRRegionTranslator.translateOrdered(
                 regions: regions,
-                using: provider,
+                providers: providers,
                 from: sourceLanguage,
                 to: targetLanguage
             )
-        } catch is CancellationError {
-            return .cancelled
-        } catch {
-            return .failed(message: String(localized: "Translation failed: \(error.localizedDescription)"))
+        }
+        if Task.isCancelled { return .cancelled }
+
+        guard !providerResults.isEmpty else {
+            return .failed(message: String(localized: "Translation failed"))
         }
 
         var overlays: [OCRTextOverlay] = []
-        for (region, translation) in zip(regions, translations) {
-            let overlay = OCRTextOverlay(region: region, translation: translation)
+        for (index, region) in regions.enumerated() {
+            var variants: [OCRTranslationVariant] = []
+            for result in providerResults {
+                guard index < result.translations.count else { continue }
+                let text = result.translations[index]
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    variants.append(OCRTranslationVariant(providerName: result.providerName, text: text))
+                }
+            }
+            let overlay = OCRTextOverlay(region: region, variants: variants)
             if overlay.hasTranslation {
                 overlays.append(overlay)
             }

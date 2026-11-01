@@ -105,9 +105,19 @@ struct TranslationOverlayCompositorTests {
         )
         let overlay = OCRTextOverlay(region: region, translation: "  你好  ")
         #expect(overlay.hasTranslation)
-        #expect(overlay.translation == "你好")
+        #expect(overlay.displayLines == ["你好"])
         #expect(overlay.originalText == "Hello")
         #expect(overlay.boundingBox == region.boundingBox)
+
+        let multi = OCRTextOverlay(
+            region: region,
+            variants: [
+                OCRTranslationVariant(providerName: "A", text: "甲"),
+                OCRTranslationVariant(providerName: "B", text: "乙"),
+            ]
+        )
+        #expect(multi.lineCount == 2)
+        #expect(multi.displayLines == ["A: 甲", "B: 乙"])
     }
 }
 

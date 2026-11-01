@@ -63,7 +63,7 @@ struct GeneralSettingsView: View {
 
             Section("General") {
                 Toggle("In-place screenshot translation", isOn: $ocrInPlaceOverlay)
-                Text("When Screenshot OCR is triggered, paint each translation over the original text in the captured image instead of opening the translation popup.")
+                Text("When Screenshot OCR is triggered, paint each translation over the original text in the captured image instead of opening the translation popup. Up to three automatically-enabled services are stacked for comparison (order follows Provider Order in Settings).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
