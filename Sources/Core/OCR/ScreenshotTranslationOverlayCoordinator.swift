@@ -30,9 +30,9 @@ final class ScreenshotTranslationOverlayCoordinator {
     /// - `onOriginal`: once, raw screenshot.
     /// - `onTranslated`: repeatedly as regions/stream chunks arrive (progressive replace).
     func run(
-        onOriginal: @MainActor (CGImage) -> Void,
-        onTranslated: @MainActor (CGImage) -> Void,
-        onStatus: @MainActor (String) -> Void
+        onOriginal: @escaping @MainActor (CGImage) -> Void,
+        onTranslated: @escaping @MainActor (CGImage) -> Void,
+        onStatus: @escaping @MainActor (String) -> Void
     ) async -> Outcome {
         guard permissionManager.isScreenRecordingGranted else {
             return .failed(message: String(localized: "Screen recording permission not granted. Open Settings to enable it."))
@@ -73,8 +73,8 @@ final class ScreenshotTranslationOverlayCoordinator {
             regions: regions,
             total: total,
             providerName: providerName,
-            onTranslated: onTranslated,
-            onStatus: onStatus
+            onTranslated: { image in onTranslated(image) },
+            onStatus: { status in onStatus(status) }
         )
 
         if Task.isCancelled { return .cancelled }

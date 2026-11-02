@@ -53,7 +53,7 @@ enum OCRRegionTranslator {
         regions: [OCRTextRegion],
         using provider: any TranslationProvider,
         from sourceLanguage: String?,
-        to targetLanguage: String?,
+        to targetLanguage: String,
         onRegionUpdated: @escaping @MainActor ([String]) -> Void
     ) async throws -> [String] {
         let usable = regions.filter(\.isUsable)
@@ -65,16 +65,11 @@ enum OCRRegionTranslator {
         let sink = RegionSink(count: usable.count)
         onRegionUpdated(sink.snapshot())
 
+        let update = onRegionUpdated
+
         try await withThrowingTaskGroup(of: Void.self) { group in
             var nextIndex = 0
             var inFlight = 0
-
-            func publish() {
-                let snap = sink.snapshot()
-                Task { @MainActor in
-                    onRegionUpdated(snap)
-                }
-            }
 
             func launchNext() {
                 guard nextIndex < usable.count else { return }
@@ -95,11 +90,17 @@ enum OCRRegionTranslator {
                         let partial = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !partial.isEmpty else { continue }
                         sink.set(index, partial)
-                        publish()
+                        let snap = sink.snapshot()
+                        await MainActor.run {
+                            update(snap)
+                        }
                     }
                     let final = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
                     sink.set(index, final)
-                    publish()
+                    let snap = sink.snapshot()
+                    await MainActor.run {
+                        update(snap)
+                    }
                 }
             }
 
@@ -128,7 +129,7 @@ enum OCRRegionTranslator {
         regions: [OCRTextRegion],
         using provider: any TranslationProvider,
         from sourceLanguage: String?,
-        to targetLanguage: String?
+        to targetLanguage: String
     ) async throws -> [String] {
         try await translateProgressive(
             regions: regions,
