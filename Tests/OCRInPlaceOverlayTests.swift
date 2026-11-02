@@ -67,7 +67,7 @@ struct TranslationOverlayCompositorTests {
             preferredSize: 16
         )
         #expect(shortSize <= 16)
-        #expect(shortSize >= 7)
+        #expect(shortSize >= TranslationOverlayCompositor.readableMinFontSize)
         let shortBounds = TranslationOverlayCompositor.textBounds(
             short,
             font: .systemFont(ofSize: shortSize, weight: .medium),
@@ -75,8 +75,7 @@ struct TranslationOverlayCompositorTests {
         )
         #expect(shortBounds.height <= maxHeight)
 
-        // Long text must not exceed the preferred size; height may still wrap past the plate
-        // at min font size, so only assert the size was reduced.
+        // Long text must not exceed the preferred size and never shrink below the readable floor.
         let long = String(repeating: "译", count: 40)
         let longSize = TranslationOverlayCompositor.fittedFontSize(
             for: long,
@@ -85,7 +84,7 @@ struct TranslationOverlayCompositorTests {
             preferredSize: 24
         )
         #expect(longSize < 24)
-        #expect(longSize >= 7)
+        #expect(longSize >= TranslationOverlayCompositor.readableMinFontSize)
     }
 
     @Test func compositeReturnsOriginalWhenNoPaintableOverlays() throws {

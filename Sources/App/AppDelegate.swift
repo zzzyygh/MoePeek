@@ -311,7 +311,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             },
             onTranslated: { [weak self] image in
-                self?.screenshotOverlayController.showTranslated(image: image, statusText: nil)
+                // Progressive paints: replace the image but keep the status strip
+                // (count/provider) that onStatus is updating in parallel.
+                self?.screenshotOverlayController.updateImage(image, keepStatus: true)
             },
             onStatus: { [weak self] status in
                 self?.screenshotOverlayController.updateStatus(status)

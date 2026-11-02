@@ -100,6 +100,17 @@ final class TranslationOverlayController {
         render()
     }
 
+    /// Progressive paint: swap the bitmap without touching loading/status.
+    func updateImage(_ image: CGImage, keepStatus: Bool) {
+        let nsImage = NSImage(cgImage: image, size: pixelSize(for: image))
+        currentImage = nsImage
+        isLoading = false
+        if !keepStatus {
+            statusText = nil
+        }
+        render()
+    }
+
     /// Updates the footer without touching the image. No-op before the first frame.
     func updateStatus(_ text: String?) {
         guard currentImage != nil else { return }

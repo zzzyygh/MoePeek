@@ -56,27 +56,24 @@ enum TranslationOverlayCompositor {
             ).intersection(imageBounds)
             guard !pixelRect.isNull, pixelRect.width >= 2, pixelRect.height >= 2 else { continue }
 
-            let padding = max(2, pixelRect.height * 0.12)
+            let padding = max(4, pixelRect.height * 0.18)
             var coverRect = OCRGeometry.expanded(pixelRect, inset: padding, bounds: imageBounds)
             guard !coverRect.isNull, coverRect.width >= 2, coverRect.height >= 2 else { continue }
 
-            // Grow the plate vertically so stacked comparison lines all fit.
-            let lineCount = overlay.lines.count
-            if lineCount > 1 {
-                let perLine = max(pixelRect.height * 0.9, 16)
-                let needed = perLine * CGFloat(lineCount) + padding * 2
-                if needed > coverRect.height {
-                    let grow = (needed - coverRect.height) / 2
-                    coverRect = coverRect.insetBy(dx: 0, dy: -grow).intersection(imageBounds)
-                }
-            }
+            let lineCount = max(1, overlay.lines.count)
+            coverRect = growPlateToFit(
+                coverRect: coverRect,
+                lines: overlay.lines,
+                imageBounds: imageBounds,
+                padding: padding
+            )
             guard coverRect.width >= 2, coverRect.height >= 2 else { continue }
 
             let background = sampleBackgroundColor(in: image, around: coverRect)
             let textColor = contrastingTextColor(against: background)
 
             let plateRect = coverRect.insetBy(dx: -1, dy: -1)
-            let path = CGPath(roundedRect: plateRect, cornerWidth: 3, cornerHeight: 3, transform: nil)
+            let path = CGPath(roundedRect: plateRect, cornerWidth: 4, cornerHeight: 4, transform: nil)
             context.setFillColor(background.cgColor)
             context.addPath(path)
             context.fillPath()
@@ -87,9 +84,40 @@ enum TranslationOverlayCompositor {
                 context: context,
                 textColor: textColor
             )
+            _ = lineCount
         }
 
         return context.makeImage() ?? image
+    }
+
+    /// Expands the plate vertically until every line can render at a readable size.
+    private static func growPlateToFit(
+        coverRect: CGRect,
+        lines: [String],
+        imageBounds: CGRect,
+        padding: CGFloat
+    ) -> CGRect {
+        guard !lines.isEmpty else { return coverRect }
+        var rect = coverRect
+        let minFont: CGFloat = readableMinFontSize
+        let maxWidth = max(20, rect.width - 10)
+
+        // Estimate height needed at min font (worst-case wrap).
+        for _ in 0..<6 {
+            var needed: CGFloat = 0
+            for line in lines {
+                let font = NSFont.systemFont(ofSize: minFont, weight: .medium)
+                let bounds = textBounds(line, font: font, maxWidth: maxWidth)
+                needed += max(bounds.height, minFont * 1.25)
+            }
+            needed += padding * 0.5 + 4
+            if needed <= rect.height { break }
+            let grow = (needed - rect.height) / 2 + 2
+            let expanded = rect.insetBy(dx: 0, dy: -grow).intersection(imageBounds)
+            if expanded.height <= rect.height { break } // hit image edge
+            rect = expanded
+        }
+        return rect
     }
 
     /// Average of a 1px ring just outside the cover rect; falls back to a light plate.
@@ -118,13 +146,17 @@ enum TranslationOverlayCompositor {
             : NSColor(calibratedWhite: 0.97, alpha: 1)
     }
 
+    /// Absolute floor for painted translation type (pixels in the screenshot bitmap).
+    /// Kept high enough that CJK remains readable after Retina downscale in the panel.
+    static let readableMinFontSize: CGFloat = 13
+
     /// Returns the font size that lets `text` fit `maxSize` (width × height), shrinking as needed.
     static func fittedFontSize(
         for text: String,
         maxWidth: CGFloat,
         maxHeight: CGFloat,
         preferredSize: CGFloat,
-        minSize: CGFloat = 7
+        minSize: CGFloat = TranslationOverlayCompositor.readableMinFontSize
     ) -> CGFloat {
         guard !text.isEmpty, maxWidth > 4, maxHeight > 4 else { return minSize }
         var fontSize = max(minSize, min(preferredSize, maxHeight))
@@ -134,7 +166,7 @@ enum TranslationOverlayCompositor {
             if bounds.height <= maxHeight, bounds.width <= maxWidth + 0.5 {
                 return fontSize
             }
-            fontSize *= 0.92
+            fontSize *= 0.94
         }
         return minSize
     }
@@ -195,11 +227,12 @@ enum TranslationOverlayCompositor {
     ) {
         guard !text.isEmpty, rect.width > 4, rect.height > 4 else { return }
 
-        let horizontalPadding: CGFloat = 4
-        let verticalPadding: CGFloat = 2
+        let horizontalPadding: CGFloat = 6
+        let verticalPadding: CGFloat = 3
         let maxTextWidth = max(4, rect.width - horizontalPadding * 2)
         let maxTextHeight = max(4, rect.height - verticalPadding * 2)
-        let preferredSize = max(8, min(rect.height * 0.72, maxTextHeight))
+        // Prefer a large size first; fittedFontSize only shrinks down to readableMinFontSize.
+        let preferredSize = max(readableMinFontSize, min(rect.height * 0.9, maxTextHeight))
 
         let fontSize = fittedFontSize(
             for: text,
@@ -207,7 +240,7 @@ enum TranslationOverlayCompositor {
             maxHeight: maxTextHeight,
             preferredSize: preferredSize
         )
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center

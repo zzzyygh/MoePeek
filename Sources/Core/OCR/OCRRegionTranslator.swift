@@ -3,8 +3,8 @@ import Foundation
 
 /// Translates OCR regions for the in-place overlay.
 ///
-/// Overlay mode only needs one readable result per region, so it uses the first
-/// automatically-enabled provider slot instead of fanning out to every provider.
+/// Regions are translated independently so the overlay can paint each result
+/// as soon as it arrives (progressive “translate a little, replace a little”).
 @MainActor
 enum OCRRegionTranslator {
     enum TranslatorError: LocalizedError {
@@ -18,114 +18,125 @@ enum OCRRegionTranslator {
         }
     }
 
-    /// How many individual region requests may share the network at once when the
-    /// single batched request cannot be mapped back 1:1.
+    /// Concurrent region requests (responsive without hammering free APIs).
     private static let maxParallelRegionRequests = 3
 
-    /// Translates each region's text, preserving input order in the output.
+    /// Thread-safe accumulator shared by concurrent region streams.
+    private final class RegionSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String]
+        let count: Int
+
+        init(count: Int) {
+            self.count = count
+            self.values = [String](repeating: "", count: count)
+        }
+
+        func set(_ index: Int, _ value: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard values.indices.contains(index) else { return }
+            values[index] = value
+        }
+
+        func snapshot() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+    }
+
+    /// Translates each region independently, publishing partial results as streams advance.
+    /// - Parameter onRegionUpdated: Main-actor callback with the full `[translation]` array
+    ///   aligned to `regions.filter(\.isUsable)`.
+    static func translateProgressive(
+        regions: [OCRTextRegion],
+        using provider: any TranslationProvider,
+        from sourceLanguage: String?,
+        to targetLanguage: String?,
+        onRegionUpdated: @escaping @MainActor ([String]) -> Void
+    ) async throws -> [String] {
+        let usable = regions.filter(\.isUsable)
+        guard !usable.isEmpty else {
+            onRegionUpdated([])
+            return []
+        }
+
+        let sink = RegionSink(count: usable.count)
+        onRegionUpdated(sink.snapshot())
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var nextIndex = 0
+            var inFlight = 0
+
+            func publish() {
+                let snap = sink.snapshot()
+                Task { @MainActor in
+                    onRegionUpdated(snap)
+                }
+            }
+
+            func launchNext() {
+                guard nextIndex < usable.count else { return }
+                let index = nextIndex
+                let source = usable[index].trimmedText
+                nextIndex += 1
+                inFlight += 1
+
+                group.addTask { [provider] in
+                    var accumulated = ""
+                    let stream = provider.translateStream(
+                        source,
+                        from: sourceLanguage,
+                        to: targetLanguage
+                    )
+                    for try await chunk in stream {
+                        accumulated += chunk
+                        let partial = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !partial.isEmpty else { continue }
+                        sink.set(index, partial)
+                        publish()
+                    }
+                    let final = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+                    sink.set(index, final)
+                    publish()
+                }
+            }
+
+            while nextIndex < usable.count, inFlight < maxParallelRegionRequests {
+                launchNext()
+            }
+
+            do {
+                for try await _ in group {
+                    inFlight -= 1
+                    launchNext()
+                }
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+
+        let final = sink.snapshot()
+        onRegionUpdated(final)
+        return final
+    }
+
+    /// Convenience wrapper without progressive updates (tests / one-shot callers).
     static func translate(
         regions: [OCRTextRegion],
         using provider: any TranslationProvider,
         from sourceLanguage: String?,
-        to targetLanguage: String
+        to targetLanguage: String?
     ) async throws -> [String] {
-        let usable = regions.filter(\.isUsable)
-        guard !usable.isEmpty else { return [] }
-
-        let texts = usable.map(\.trimmedText)
-
-        if let mapped = try? await translateBatched(
-            texts,
+        try await translateProgressive(
+            regions: regions,
             using: provider,
             from: sourceLanguage,
-            to: targetLanguage
-        ) {
-            return mapped
-        }
-
-        return try await translateIndividually(
-            texts,
-            using: provider,
-            from: sourceLanguage,
-            to: targetLanguage
+            to: targetLanguage,
+            onRegionUpdated: { _ in }
         )
-    }
-
-    /// Joins every line with `\n`, asks the provider once, then splits the answer.
-    /// Returns nil when the split does not line up with the inputs.
-    static func translateBatched(
-        _ texts: [String],
-        using provider: any TranslationProvider,
-        from sourceLanguage: String?,
-        to targetLanguage: String
-    ) async throws -> [String]? {
-        guard texts.count > 1 else {
-            let single = try await collect(provider.translateStream(
-                texts[0],
-                from: sourceLanguage,
-                to: targetLanguage
-            ))
-            let trimmed = single.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : [trimmed]
-        }
-
-        let joined = texts.joined(separator: "\n")
-        let raw = try await collect(provider.translateStream(
-            joined,
-            from: sourceLanguage,
-            to: targetLanguage
-        ))
-        let lines = raw
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-        guard lines.count == texts.count, lines.allSatisfy({ !$0.isEmpty }) else {
-            return nil
-        }
-        return lines
-    }
-
-    /// Per-region requests with a small concurrency cap. Used when batching fails to map.
-    static func translateIndividually(
-        _ texts: [String],
-        using provider: any TranslationProvider,
-        from sourceLanguage: String?,
-        to targetLanguage: String
-    ) async throws -> [String] {
-        try await withThrowingTaskGroup(of: (Int, String).self) { group in
-            var results = [String](repeating: "", count: texts.count)
-            var nextIndex = 0
-            var inFlight = 0
-
-            func launchNext() {
-                guard nextIndex < texts.count else { return }
-                let index = nextIndex
-                let text = texts[index]
-                nextIndex += 1
-                inFlight += 1
-                group.addTask { [provider] in
-                    let output = try await self.collect(provider.translateStream(
-                        text,
-                        from: sourceLanguage,
-                        to: targetLanguage
-                    ))
-                    return (index, output.trimmingCharacters(in: .whitespacesAndNewlines))
-                }
-            }
-
-            while nextIndex < texts.count, inFlight < maxParallelRegionRequests {
-                launchNext()
-            }
-
-            for try await (index, value) in group {
-                results[index] = value
-                inFlight -= 1
-                launchNext()
-            }
-
-            // Preserve blanks rather than failing the whole overlay for one empty box.
-            return results
-        }
     }
 
     /// Detects the source language for the combined OCR text, respecting the forced-source setting.
@@ -153,8 +164,8 @@ enum OCRRegionTranslator {
         )
     }
 
-    /// Provider used for in-place overlay: the configured preferred slot when it is
-    /// enabled and automatic; otherwise the first automatically-enabled slot.
+    /// Provider used for in-place overlay: preferred slot when enabled + automatic;
+    /// otherwise the first automatically-enabled slot.
     static func overlayProvider(from registry: TranslationProviderRegistry) -> (any TranslationProvider)? {
         let automatic = registry.enabledSlots.filter { registry.translatesAutomatically($0) }
         let preferredID = Defaults[.ocrOverlayPreferredProvider]
@@ -165,16 +176,7 @@ enum OCRRegionTranslator {
         return automatic.first
     }
 
-    /// First automatically-enabled slot in user order — single-source fallback.
     static func primaryProvider(from registry: TranslationProviderRegistry) -> (any TranslationProvider)? {
         overlayProvider(from: registry)
-    }
-
-    private static func collect(_ stream: AsyncThrowingStream<String, Error>) async throws -> String {
-        var accumulated = ""
-        for try await chunk in stream {
-            accumulated += chunk
-        }
-        return accumulated
     }
 }
