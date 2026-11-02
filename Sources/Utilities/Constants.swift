@@ -314,6 +314,11 @@ extension Defaults.Keys {
     // Language detection
     static let detectionConfidenceThreshold = Key<Double>("detectionConfidenceThreshold", default: 0.3)
 
+    // Screenshot OCR: paint translations over the original text instead of opening the popup.
+    static let ocrInPlaceOverlay = Key<Bool>("ocrInPlaceOverlay", default: true)
+    // Preferred provider id for in-place overlay; empty = first automatically-enabled slot.
+    static let ocrOverlayPreferredProvider = Key<String>("ocrOverlayPreferredProvider", default: "")
+
     // Clipboard grabber timeout
     static let clipboardTimeout = Key<Int>("clipboardTimeout", default: 200)
 

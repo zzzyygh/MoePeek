@@ -36,15 +36,7 @@ struct MenuItemView: View {
         .globalKeyboardShortcut(.inputTranslation)
 
         Button {
-            guard let coordinator = appDelegate.coordinator,
-                  let panelController = appDelegate.panelController else { return }
-            appDelegate.cancelSmartTranslation()
-            Task {
-                let outcome = await coordinator.ocrAndTranslate()
-                if outcome.shouldPresent {
-                    panelController.showAtCursor()
-                }
-            }
+            appDelegate.performScreenshotOCR()
         } label: {
             Label("Screenshot OCR", systemImage: "text.viewfinder")
         }

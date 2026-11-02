@@ -1,0 +1,75 @@
+name: Build App
+
+# Unsigned CI build for feature branches: produces MoePeek.app.zip as an artifact.
+# Does not use Prod secrets and does not publish a Release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "feature/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Tuist via mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Resolve dependencies and generate project
+        run: |
+          cp Configurations/Signing.xcconfig.example Configurations/Signing.xcconfig
+          tuist install && tuist generate --no-open
+
+      - name: Strip unused math fonts
+        run: |
+          find .build/checkouts/swiftui-math/Sources/SwiftUIMath/mathFonts.bundle \
+            \( -name '*.otf' -o -name '*.plist' \) -delete 2>/dev/null || true
+
+      - name: Build MoePeek.app
+        run: |
+          xcodebuild build \
+            -workspace MoePeek.xcworkspace \
+            -scheme MoePeek \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build/DerivedData \
+            MACOSX_DEPLOYMENT_TARGET=15.0 \
+            SPARKLE_ED_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package app
+        run: |
+          APP_PATH=$(find build/DerivedData/Build/Products -name 'MoePeek.app' -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::MoePeek.app not found in build products"
+            find build/DerivedData -maxdepth 6 -type d -name '*.app' || true
+            exit 1
+          fi
+          echo "Found app at $APP_PATH"
+          # Remove quarantine so the zip is usable after download
+          xattr -cr "$APP_PATH" || true
+          ditto -c -k --keepParent "$APP_PATH" build/MoePeek.app.zip
+          ls -lh build/MoePeek.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoePeek-app
+          path: build/MoePeek.app.zip
+          if-no-files-found: error
+          retention-days: 14

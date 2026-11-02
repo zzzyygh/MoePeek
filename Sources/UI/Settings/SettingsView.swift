@@ -22,7 +22,7 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            GeneralSettingsView()
+            GeneralSettingsView(registry: registry)
                 .tabItem {
                     Label("General", systemImage: "gear")
                 }

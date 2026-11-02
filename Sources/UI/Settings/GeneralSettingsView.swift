@@ -6,9 +6,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct GeneralSettingsView: View {
+    let registry: TranslationProviderRegistry
+
     @Default(.isAutoDetectEnabled) private var isAutoDetectEnabled
     @Default(.textDetectionMode) private var textDetectionMode
     @Default(.triggerActivationMode) private var triggerActivationMode
+    @Default(.ocrInPlaceOverlay) private var ocrInPlaceOverlay
+    @Default(.ocrOverlayPreferredProvider) private var ocrOverlayPreferredProvider
     @Default(.showInDock) private var showInDock
     @Default(.popupDefaultWidth) private var popupDefaultWidth
     @Default(.popupDefaultHeight) private var popupDefaultHeight
@@ -40,6 +44,13 @@ struct GeneralSettingsView: View {
         }
     }
 
+    /// Enabled automatic providers offered as the in-place overlay source.
+    private var overlayProviderChoices: [(id: String, name: String)] {
+        registry.enabledSlots
+            .filter { registry.translatesAutomatically($0) }
+            .map { (id: $0.id, name: $0.displayName) }
+    }
+
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var showRestartAlert = false
     @State private var availableFonts = NSFontManager.shared.availableFontFamilies
@@ -61,6 +72,23 @@ struct GeneralSettingsView: View {
             }
 
             Section("General") {
+                Toggle("In-place screenshot translation", isOn: $ocrInPlaceOverlay)
+                Text("When Screenshot OCR is triggered, paint the translation over the original text in the captured image instead of opening the translation popup.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if ocrInPlaceOverlay {
+                    Picker("Overlay translation source:", selection: $ocrOverlayPreferredProvider) {
+                        Text("Auto (first enabled)").tag("")
+                        ForEach(overlayProviderChoices, id: \.id) { choice in
+                            Text(choice.name).tag(choice.id)
+                        }
+                    }
+                    Text("Used for in-place screenshot translation only. Providers must be enabled under Services; order under Order still applies when set to Auto.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Picker("App Language:", selection: $appLanguage) {
                     ForEach(AppLanguage.allCases, id: \.self) { language in
                         Text(language.displayName).tag(language)

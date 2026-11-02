@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var onboardingController: OnboardingWindowController!
     var selectionMonitor: SelectionMonitor!
     var triggerIconController: TriggerIconController!
+    var screenshotOverlayCoordinator: ScreenshotTranslationOverlayCoordinator!
+    lazy var screenshotOverlayController = TranslationOverlayController()
     lazy var copyToastController = CopyToastController()
     lazy var updaterController = UpdaterController()
     var settingsController: SettingsWindowController!
@@ -30,6 +32,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         permissionManager = PermissionManager()
         coordinator = TranslationCoordinator(permissionManager: permissionManager, registry: registry)
+        screenshotOverlayCoordinator = ScreenshotTranslationOverlayCoordinator(
+            permissionManager: permissionManager,
+            registry: registry
+        )
         settingsController = SettingsWindowController(
             registry: registry,
             ttsRegistry: ttsRegistry,
@@ -271,6 +277,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         smartTranslationTask?.cancel()
     }
 
+    /// Screenshot OCR entry used by the global shortcut and the menu bar item.
+    /// Defaults to in-place overlay (translations painted on the shot); the classic
+    /// multi-provider popup remains available when the overlay preference is off.
+    func performScreenshotOCR() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.cancelSmartTranslationAndWait()
+            guard !Task.isCancelled else { return }
+
+            if Defaults[.ocrInPlaceOverlay] {
+                await self.runInPlaceScreenshotOCR()
+            } else {
+                let outcome = await self.coordinator.ocrAndTranslate()
+                if outcome.shouldPresent {
+                    self.panelController.showAtCursor()
+                }
+            }
+        }
+    }
+
+    private func runInPlaceScreenshotOCR() async {
+        // Overlay owns the screen after capture; clear any existing popup first.
+        if panelController.isVisible {
+            panelController.dismiss()
+        }
+
+        let outcome = await screenshotOverlayCoordinator.run(
+            onOriginal: { [weak self] image in
+                self?.screenshotOverlayController.showOriginal(
+                    image: image,
+                    statusText: String(localized: "Translating…")
+                )
+            },
+            onTranslated: { [weak self] image in
+                // Progressive paints: replace the image but keep the status strip
+                // (count/provider) that onStatus is updating in parallel.
+                self?.screenshotOverlayController.updateImage(image, keepStatus: true)
+            },
+            onStatus: { [weak self] status in
+                self?.screenshotOverlayController.updateStatus(status)
+            }
+        )
+
+        switch outcome {
+        case .shown:
+            break
+        case .cancelled:
+            screenshotOverlayController.dismiss()
+        case let .failed(message):
+            screenshotOverlayController.dismiss()
+            copyToastController.show(message: message)
+        }
+    }
+
     /// Silent OCR: copy recognized text to the clipboard; confirm with a small toast.
     func performSilentOCR() {
         Task { @MainActor [weak self] in
@@ -310,14 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         KeyboardShortcuts.onKeyUp(for: .ocrScreenshot) { [weak self] in
-            guard let self else { return }
-            self.cancelSmartTranslation()
-            Task { @MainActor in
-                let outcome = await self.coordinator.ocrAndTranslate()
-                if outcome.shouldPresent {
-                    self.panelController.showAtCursor()
-                }
-            }
+            self?.performScreenshotOCR()
         }
 
         KeyboardShortcuts.onKeyUp(for: .silentOCR) { [weak self] in
