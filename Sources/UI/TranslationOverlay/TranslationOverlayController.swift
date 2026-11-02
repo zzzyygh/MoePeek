@@ -20,17 +20,20 @@ final class TranslationOverlayPanel: NSPanel {
         isMovableByWindowBackground = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         isReleasedWhenClosed = false
-        animationBehavior = .utilityWindow
+        animationBehavior = .none
     }
 
     override var canBecomeKey: Bool { true }
 }
 
-/// Content view: the translated screenshot plus an optional status strip while loading.
+/// Content view: the translated screenshot plus a fixed-height status strip.
 private struct TranslationOverlayContentView: View {
     let image: NSImage
     var isLoading: Bool
     var statusText: String?
+
+    /// Always reserved so progressive updates never resize the window.
+    static let statusStripHeight: CGFloat = 36
 
     var body: some View {
         VStack(spacing: 0, content: {
@@ -46,23 +49,24 @@ private struct TranslationOverlayContentView: View {
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let statusText, !statusText.isEmpty {
-                HStack(spacing: 6) {
-                    if isLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(statusText)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.bar)
+                Text(statusText ?? "")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(height: Self.statusStripHeight)
+            .background(.bar)
         })
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
@@ -83,6 +87,8 @@ final class TranslationOverlayController {
     private var currentImage: NSImage?
     private var isLoading = false
     private var statusText: String?
+    /// Window origin is fixed on first show so streaming paints never jump the panel.
+    private var hasPlacedFrame = false
 
     func showOriginal(image: CGImage, statusText: String?) {
         let nsImage = NSImage(cgImage: image, size: pixelSize(for: image))
@@ -125,6 +131,7 @@ final class TranslationOverlayController {
         currentImage = nil
         isLoading = false
         statusText = nil
+        hasPlacedFrame = false
         panel?.contentView = nil
         panel?.close()
         panel = nil
@@ -139,13 +146,16 @@ final class TranslationOverlayController {
     private func render() {
         guard let image = currentImage else { return }
         let contentSize = fittedContentSize(for: image)
+        let isFirstShow = panel == nil
         let panel = self.panel ?? TranslationOverlayPanel(contentRect: NSRect(origin: .zero, size: contentSize))
         self.panel = panel
 
         let rootView = TranslationOverlayContentView(image: image, isLoading: isLoading, statusText: statusText)
         if let hostView {
             hostView.rootView = rootView
-            hostView.setFrameSize(contentSize)
+            if hostView.frame.size != contentSize {
+                hostView.setFrameSize(contentSize)
+            }
         } else {
             let host = NSHostingView(rootView: rootView)
             host.setFrameSize(contentSize)
@@ -153,8 +163,17 @@ final class TranslationOverlayController {
             hostView = host
         }
 
-        panel.setContentSize(contentSize)
-        place(panel, contentSize: contentSize)
+        // Keep the on-screen frame stable across progressive paints.
+        if isFirstShow || !hasPlacedFrame {
+            panel.setContentSize(contentSize)
+            place(panel, contentSize: contentSize)
+            hasPlacedFrame = true
+        } else if panel.frame.size != contentSize {
+            // Same origin, only grow/shrink if the bitmap scale somehow changed.
+            let origin = panel.frame.origin
+            panel.setFrame(NSRect(origin: origin, size: contentSize), display: true)
+        }
+
         panel.orderFrontRegardless()
 
         if dismissMonitor == nil {
@@ -170,21 +189,21 @@ final class TranslationOverlayController {
     private func fittedContentSize(for image: NSImage) -> CGSize {
         let imageSize = image.size
         guard imageSize.width > 0, imageSize.height > 0 else {
-            return CGSize(width: 480, height: 320)
+            return CGSize(width: 480, height: 320 + TranslationOverlayContentView.statusStripHeight)
         }
 
         let screen = NSScreen.main?.visibleFrame
             ?? NSScreen.screens.first?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
 
+        let statusHeight = TranslationOverlayContentView.statusStripHeight
         let maxWidth = max(320, screen.width * 0.86)
-        let maxHeight = max(240, screen.height * 0.82)
+        let maxHeight = max(240, screen.height * 0.82 - statusHeight)
         let scale = min(maxWidth / imageSize.width, maxHeight / imageSize.height, 1)
 
         var size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        if let statusText, !statusText.isEmpty {
-            size.height += 36
-        }
+        // Always reserve the status strip so progressive updates never change height.
+        size.height += statusHeight
         size.width = max(240, size.width)
         size.height = max(160, size.height)
         return size

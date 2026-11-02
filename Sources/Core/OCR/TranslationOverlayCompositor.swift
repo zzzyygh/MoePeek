@@ -60,12 +60,22 @@ enum TranslationOverlayCompositor {
             var coverRect = OCRGeometry.expanded(pixelRect, inset: padding, bounds: imageBounds)
             guard !coverRect.isNull, coverRect.width >= 2, coverRect.height >= 2 else { continue }
 
-            let lineCount = max(1, overlay.lines.count)
+            // Narrow OCR hits (sidebars, thin columns) must not squeeze text into a
+            // one-character-wide vertical stack — widen the plate to a readable minimum.
+            let minPlateWidth = max(120, min(280, CGFloat(width) * 0.14))
+            coverRect = ensureMinWidth(coverRect, minWidth: minPlateWidth, imageBounds: imageBounds)
+
             coverRect = growPlateToFit(
                 coverRect: coverRect,
                 lines: overlay.lines,
                 imageBounds: imageBounds,
                 padding: padding
+            )
+            // Long translations in still-narrow boxes: expand width before wrapping to death.
+            coverRect = expandWidthForLongText(
+                coverRect,
+                lines: overlay.lines,
+                imageBounds: imageBounds
             )
             guard coverRect.width >= 2, coverRect.height >= 2 else { continue }
 
@@ -84,10 +94,40 @@ enum TranslationOverlayCompositor {
                 context: context,
                 textColor: textColor
             )
-            _ = lineCount
         }
 
         return context.makeImage() ?? image
+    }
+
+    /// Centers a minimum-width plate on `rect`, clamped to the image.
+    private static func ensureMinWidth(_ rect: CGRect, minWidth: CGFloat, imageBounds: CGRect) -> CGRect {
+        guard rect.width < minWidth else { return rect }
+        let grow = (minWidth - rect.width) / 2
+        return rect.insetBy(dx: -grow, dy: 0).intersection(imageBounds)
+    }
+
+    /// If text would wrap into a tall skinny column, widen the plate (up to ~40% of image).
+    private static func expandWidthForLongText(_ rect: CGRect, lines: [String], imageBounds: CGRect) -> CGRect {
+        guard !lines.isEmpty else { return rect }
+        let maxWidth = imageBounds.width * 0.4
+        var plate = rect
+        for _ in 0..<4 {
+            if plate.width >= maxWidth { break }
+            let font = NSFont.systemFont(ofSize: readableMinFontSize, weight: .medium)
+            let longest = lines.max { a, b in
+                textBounds(a, font: font, maxWidth: plate.width).width < textBounds(b, font: font, maxWidth: plate.width).width
+            } ?? lines[0]
+            let bounds = textBounds(longest, font: font, maxWidth: max(20, plate.width - 8))
+            // More than ~5 visual lines in this plate → widen instead of stacking vertically.
+            let estimatedLines = max(1, Int((bounds.height / max(1, readableMinFontSize * 1.2)).rounded(.up)))
+            if estimatedLines <= 5 { break }
+            let grow = min(40, (maxWidth - plate.width) / 3)
+            guard grow > 1 else { break }
+            let expanded = plate.insetBy(dx: -grow, dy: 0).intersection(imageBounds)
+            if expanded.width <= plate.width { break }
+            plate = expanded
+        }
+        return plate
     }
 
     /// Expands the plate vertically until every line can render at a readable size.
